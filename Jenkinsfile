@@ -3,15 +3,21 @@ pipeline {
     
     environment {
         DOCKER_REGISTRY = 'docker.io'
-        DOCKER_IMAGE = 'wolfie8935/flask-app'
-        DOCKER_TAG = "${BUILD_NUMBER}"
+        DOCKER_USERNAME = 'wolfie8935'
+        DOCKER_IMAGE_NAME = 'flask-app'
+        DOCKER_CREDENTIALS = credentials('docker-credentials')
+        KUBECONFIG = credentials('kubeconfig-credentials')
+        NAMESPACE = 'default'
     }
     
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
-                echo "Repository checked out successfully"
+                script {
+                    echo "Checking out repository..."
+                    checkout scm
+                    echo "Repository checked out successfully"
+                }
             }
         }
         
@@ -19,9 +25,12 @@ pipeline {
             steps {
                 script {
                     dir('app') {
-                        bat 'docker build -t %DOCKER_IMAGE%:%DOCKER_TAG% .'
-                        bat 'docker tag %DOCKER_IMAGE%:%DOCKER_TAG% %DOCKER_IMAGE%:latest'
-                        echo "Docker image built: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        echo "Building Docker image..."
+                        bat '''
+                            docker build -t ${DOCKER_USERNAME}/${DOCKER_IMAGE_NAME}:${BUILD_NUMBER} .
+                            docker tag ${DOCKER_USERNAME}/${DOCKER_IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_USERNAME}/${DOCKER_IMAGE_NAME}:latest
+                        '''
+                        echo "Docker image built: ${DOCKER_USERNAME}/${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}"
                     }
                 }
             }
@@ -31,37 +40,29 @@ pipeline {
             steps {
                 script {
                     echo "Attempting to load credentials..."
-                    try {
-                        withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                            bat '''
-                                @echo off
-                                echo ================================
-                                echo Credential Check:
-                                echo Username: %DOCKER_USER%
-                                if "%DOCKER_USER%"=="" (
-                                    echo ERROR: Username is EMPTY!
-                                    exit /b 1
-                                )
-                                if "%DOCKER_PASS%"=="" (
-                                    echo ERROR: Password is EMPTY!
-                                    exit /b 1
-                                )
+                    withCredentials([usernamePassword(credentialsId: 'docker-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                        bat '''
+                            @echo off
+                            echo ================================
+                            echo Credential Check:
+                            echo Username: %DOCKER_USER%
+                            if "%DOCKER_USER%"=="" (
+                                echo Username is NOT set
+                                exit /b 1
+                            ) else (
                                 echo Username is set correctly
+                            )
+                            
+                            if "%DOCKER_PASS%"=="" (
+                                echo Password is NOT set
+                                exit /b 1
+                            ) else (
                                 echo Password is set (length check)
-                                echo %DOCKER_PASS%> temp.txt
-                                for %%A in (temp.txt) do (
-                                    if %%~zA LSS 10 (
-                                        echo WARNING: Password seems too short - only %%~zA bytes
-                                    ) else (
-                                        echo Password length: %%~zA bytes - OK
-                                    )
-                                )
-                                del temp.txt
-                                echo ================================
-                            '''
-                        }
-                    } catch (Exception e) {
-                        error "Failed to load credentials: ${e.message}"
+                                for /F %%A in ('powershell -Command "$pass='%DOCKER_PASS%'; $pass.Length"') do set PASSLEN=%%A
+                                echo Password length: %PASSLEN% bytes - OK
+                            )
+                            echo ================================
+                        '''
                     }
                 }
             }
@@ -70,37 +71,33 @@ pipeline {
         stage('Push to Docker Hub') {
             steps {
                 script {
-                    withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    withCredentials([usernamePassword(credentialsId: 'docker-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                         bat '''
                             @echo off
                             echo Logging in to Docker Hub...
-                            set "USERNAME_LOWER=%DOCKER_USER%"
-                            for %%L in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
-                                call set "USERNAME_LOWER=%%USERNAME_LOWER:%%L=%%L%%"
-                            )
-                            echo Using username: %USERNAME_LOWER%
-                            echo %DOCKER_PASS%| docker login -u %USERNAME_LOWER% --password-stdin
+                            echo %DOCKER_PASS% | docker login -u %DOCKER_USER% --password-stdin
                             if errorlevel 1 (
-                                echo Docker login failed!
-                                echo Please check your Docker Hub credentials
+                                echo Docker login failed
                                 exit /b 1
                             )
                             echo Docker login successful
+                            
                             echo.
-                            echo Pushing image with tag %DOCKER_TAG%...
-                            docker push %DOCKER_IMAGE%:%DOCKER_TAG%
+                            echo Pushing image with tag %BUILD_NUMBER%...
+                            docker push %DOCKER_USER%/%DOCKER_IMAGE_NAME%:%BUILD_NUMBER%
                             if errorlevel 1 (
-                                echo Failed to push image with tag %DOCKER_TAG%
+                                echo Docker push failed
                                 exit /b 1
                             )
+                            
                             echo.
                             echo Pushing image with latest tag...
-                            docker push %DOCKER_IMAGE%:latest
+                            docker push %DOCKER_USER%/%DOCKER_IMAGE_NAME%:latest
                             if errorlevel 1 (
-                                echo Failed to push image with latest tag
+                                echo Docker push latest failed
                                 exit /b 1
                             )
-                            echo.
+                            
                             echo Docker images pushed successfully
                         '''
                     }
@@ -111,72 +108,56 @@ pipeline {
         stage('Deploy to Kubernetes') {
             steps {
                 script {
-                    bat '''
-                        @echo off
-                        echo Checking Kubernetes connection...
-                        kubectl cluster-info
-                        if errorlevel 1 (
-                            echo ERROR: Cannot connect to Kubernetes cluster
-                            echo Please configure kubectl on Jenkins server
-                            exit /b 1
-                        )
-                        
-                        echo.
-                        echo Applying Kubernetes configurations...
-                        kubectl apply -f k8s/configmap.yaml --validate=false
-                        if errorlevel 1 (
-                            echo Failed to apply configmap
-                            exit /b 1
-                        )
-                        echo ConfigMap applied successfully
-                        
-                        echo.
-                        kubectl apply -f k8s/deployment.yaml --validate=false
-                        if errorlevel 1 (
-                            echo Failed to apply deployment
-                            exit /b 1
-                        )
-                        echo Deployment applied successfully
-                        
-                        echo.
-                        kubectl apply -f k8s/service.yaml --validate=false
-                        if errorlevel 1 (
-                            echo Failed to apply service
-                            exit /b 1
-                        )
-                        echo Service applied successfully
-                        
-                        echo.
-                        echo Updating deployment image to %DOCKER_IMAGE%:%DOCKER_TAG%...
-                        kubectl set image deployment/flask-app flask-app=%DOCKER_IMAGE%:%DOCKER_TAG%
-                        if errorlevel 1 (
-                            echo Failed to set image
-                            exit /b 1
-                        )
-                        
-                        echo.
-                        echo Waiting for rollout to complete...
-                        kubectl rollout status deployment/flask-app --timeout=5m
-                        if errorlevel 1 (
-                            echo Rollout failed or timed out
-                            kubectl rollout undo deployment/flask-app
-                            exit /b 1
-                        )
-                        
-                        echo.
-                        echo ================================
-                        echo Deployment completed successfully!
-                        echo ================================
-                        echo.
-                        echo Deployment Status:
-                        kubectl get deployment flask-app
-                        echo.
-                        echo Pods:
-                        kubectl get pods -l app=flask-app
-                        echo.
-                        echo Service:
-                        kubectl get service flask-app
-                    '''
+                    withCredentials([file(credentialsId: 'kubeconfig-credentials', variable: 'KUBECONFIG')]) {
+                        bat '''
+                            @echo off
+                            setlocal enabledelayedexpansion
+                            
+                            echo Checking Kubernetes connection...
+                            kubectl cluster-info
+                            if errorlevel 1 (
+                                echo ERROR: Cannot connect to Kubernetes cluster
+                                echo Please configure kubectl on Jenkins server
+                                exit /b 1
+                            )
+                            
+                            echo.
+                            echo Deploying to Kubernetes cluster...
+                            
+                            echo Applying ConfigMap...
+                            kubectl apply -f k8s/configmap.yaml -n %NAMESPACE%
+                            if errorlevel 1 (
+                                echo ERROR: Failed to apply ConfigMap
+                                exit /b 1
+                            )
+                            
+                            echo Applying Deployment...
+                            kubectl set image deployment/flask-app flask-app=%DOCKER_USER%/%DOCKER_IMAGE_NAME%:%BUILD_NUMBER% -n %NAMESPACE% --record 2>nul
+                            if errorlevel 1 (
+                                echo Deployment does not exist, creating new deployment...
+                                kubectl apply -f k8s/deployment.yaml -n %NAMESPACE%
+                            ) else (
+                                echo Deployment updated with new image
+                            )
+                            
+                            echo Applying Service...
+                            kubectl apply -f k8s/service.yaml -n %NAMESPACE%
+                            if errorlevel 1 (
+                                echo ERROR: Failed to apply Service
+                                exit /b 1
+                            )
+                            
+                            echo.
+                            echo Checking deployment status...
+                            kubectl rollout status deployment/flask-app -n %NAMESPACE% --timeout=5m
+                            
+                            echo.
+                            echo Getting service information...
+                            kubectl get svc flask-app -n %NAMESPACE%
+                            
+                            echo Kubernetes deployment completed successfully!
+                        '''
+                    }
                 }
             }
         }
@@ -185,19 +166,21 @@ pipeline {
     post {
         always {
             script {
-                bat '''
-                    @echo off
-                    echo Logging out from Docker Hub...
-                    docker logout
-                '''
+                echo "Pipeline execution finished"
+                withCredentials([usernamePassword(credentialsId: 'docker-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    bat '''
+                        @echo off
+                        echo Logging out from Docker Hub...
+                        docker logout
+                    '''
+                }
             }
         }
         success {
-            echo '✓ Pipeline executed successfully!'
-            echo "Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "✓ Pipeline succeeded - Deployment successful!"
         }
         failure {
-            echo '✗ Pipeline failed - check logs above'
+            echo "✗ Pipeline failed - check logs above"
         }
     }
 }
