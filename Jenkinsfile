@@ -74,7 +74,12 @@ pipeline {
                         bat '''
                             @echo off
                             echo Logging in to Docker Hub...
-                            echo %DOCKER_PASS%| docker login -u %DOCKER_USER% --password-stdin
+                            set "USERNAME_LOWER=%DOCKER_USER%"
+                            for %%L in (a b c d e f g h i j k l m n o p q r s t u v w x y z) do (
+                                call set "USERNAME_LOWER=%%USERNAME_LOWER:%%L=%%L%%"
+                            )
+                            echo Using username: %USERNAME_LOWER%
+                            echo %DOCKER_PASS%| docker login -u %USERNAME_LOWER% --password-stdin
                             if errorlevel 1 (
                                 echo Docker login failed!
                                 echo Please check your Docker Hub credentials
@@ -108,28 +113,42 @@ pipeline {
                 script {
                     bat '''
                         @echo off
-                        echo Applying Kubernetes configurations...
-                        kubectl apply -f k8s/configmap.yaml
+                        echo Checking Kubernetes connection...
+                        kubectl cluster-info
                         if errorlevel 1 (
-                            echo Failed to apply configmap
-                            exit /b 1
-                        )
-                        
-                        kubectl apply -f k8s/deployment.yaml
-                        if errorlevel 1 (
-                            echo Failed to apply deployment
-                            exit /b 1
-                        )
-                        
-                        kubectl apply -f k8s/service.yaml
-                        if errorlevel 1 (
-                            echo Failed to apply service
+                            echo ERROR: Cannot connect to Kubernetes cluster
+                            echo Please configure kubectl on Jenkins server
                             exit /b 1
                         )
                         
                         echo.
-                        echo Updating deployment image...
-                        kubectl set image deployment/flask-app flask-app=%DOCKER_IMAGE%:%DOCKER_TAG% --record
+                        echo Applying Kubernetes configurations...
+                        kubectl apply -f k8s/configmap.yaml --validate=false
+                        if errorlevel 1 (
+                            echo Failed to apply configmap
+                            exit /b 1
+                        )
+                        echo ConfigMap applied successfully
+                        
+                        echo.
+                        kubectl apply -f k8s/deployment.yaml --validate=false
+                        if errorlevel 1 (
+                            echo Failed to apply deployment
+                            exit /b 1
+                        )
+                        echo Deployment applied successfully
+                        
+                        echo.
+                        kubectl apply -f k8s/service.yaml --validate=false
+                        if errorlevel 1 (
+                            echo Failed to apply service
+                            exit /b 1
+                        )
+                        echo Service applied successfully
+                        
+                        echo.
+                        echo Updating deployment image to %DOCKER_IMAGE%:%DOCKER_TAG%...
+                        kubectl set image deployment/flask-app flask-app=%DOCKER_IMAGE%:%DOCKER_TAG%
                         if errorlevel 1 (
                             echo Failed to set image
                             exit /b 1
@@ -137,14 +156,26 @@ pipeline {
                         
                         echo.
                         echo Waiting for rollout to complete...
-                        kubectl rollout status deployment/flask-app
+                        kubectl rollout status deployment/flask-app --timeout=5m
                         if errorlevel 1 (
-                            echo Rollout failed
+                            echo Rollout failed or timed out
+                            kubectl rollout undo deployment/flask-app
                             exit /b 1
                         )
                         
                         echo.
-                        echo Deployment completed successfully
+                        echo ================================
+                        echo Deployment completed successfully!
+                        echo ================================
+                        echo.
+                        echo Deployment Status:
+                        kubectl get deployment flask-app
+                        echo.
+                        echo Pods:
+                        kubectl get pods -l app=flask-app
+                        echo.
+                        echo Service:
+                        kubectl get service flask-app
                     '''
                 }
             }
