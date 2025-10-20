@@ -21,7 +21,47 @@ pipeline {
                     dir('app') {
                         bat 'docker build -t %DOCKER_IMAGE%:%DOCKER_TAG% .'
                         bat 'docker tag %DOCKER_IMAGE%:%DOCKER_TAG% %DOCKER_IMAGE%:latest'
-                        echo "Docker image built: %DOCKER_IMAGE%:%DOCKER_TAG%"
+                        echo "Docker image built: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Credentials Exist') {
+            steps {
+                script {
+                    echo "Attempting to load credentials..."
+                    try {
+                        withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                            bat '''
+                                @echo off
+                                echo ================================
+                                echo Credential Check:
+                                echo Username: %DOCKER_USER%
+                                if "%DOCKER_USER%"=="" (
+                                    echo ERROR: Username is EMPTY!
+                                    exit /b 1
+                                )
+                                if "%DOCKER_PASS%"=="" (
+                                    echo ERROR: Password is EMPTY!
+                                    exit /b 1
+                                )
+                                echo Username is set correctly
+                                echo Password is set (length check)
+                                echo %DOCKER_PASS%> temp.txt
+                                for %%A in (temp.txt) do (
+                                    if %%~zA LSS 10 (
+                                        echo WARNING: Password seems too short - only %%~zA bytes
+                                    ) else (
+                                        echo Password length: %%~zA bytes - OK
+                                    )
+                                )
+                                del temp.txt
+                                echo ================================
+                            '''
+                        }
+                    } catch (Exception e) {
+                        error "Failed to load credentials: ${e.message}"
                     }
                 }
             }
@@ -37,6 +77,7 @@ pipeline {
                             echo %DOCKER_PASS%| docker login -u %DOCKER_USER% --password-stdin
                             if errorlevel 1 (
                                 echo Docker login failed!
+                                echo Please check your Docker Hub credentials
                                 exit /b 1
                             )
                             echo Docker login successful
